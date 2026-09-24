@@ -1,7 +1,9 @@
 // HTTP 冒烟：启动生产服务器（HOST_PORT 可配置，默认随机端口），
-// 核对 /healthz 与首页，随后关闭。供 verify 一次性服务与本地使用。
+// 核对 /healthz 与首页；并直接执行 HTTP 取回的 Web Worker 构建产物，
+// 发求解消息核对展示结果（最优代价/计数/规范矩阵/裁决/克隆树），随后关闭。
 import { spawn } from 'node:child_process'
 import http from 'node:http'
+import vm from 'node:vm'
 
 const PORT = Number(process.env.SMOKE_PORT || 0) || 0
 const baseEnv = { ...process.env }
@@ -49,6 +51,72 @@ async function waitForHealth(deadline) {
   return false
 }
 
+// 直接执行 HTTP 取回的 Worker 构建产物（自包含 IIFE），向其 postMessage
+// 求解场景，核对回传结果与代码测试一致——即页面 Worker 实际展示的结果。
+function runWorkerBundle(code, input) {
+  let reply = null
+  const sandbox = {
+    self: {
+      postMessage(msg) { reply = msg },
+      set onmessage(fn) { this._onmessage = fn },
+    },
+  }
+  vm.createContext(sandbox)
+  vm.runInContext(code, sandbox, { filename: 'worker-bundle.js' })
+  sandbox.self._onmessage({ data: { id: 1, input } })
+  return reply
+}
+
+async function checkWorkerResult(code, asset) {
+  // 带标签零代价补全场景：4 细胞 × 3 突变，前两列 8 个问号，第三列固定 0。
+  const input = {
+    matrix: [
+      [-1, -1, 0],
+      [-1, -1, 0],
+      [-1, -1, 0],
+      [-1, -1, 0],
+    ],
+    // 行优先问号序：(0,0)(0,1)(1,0)(1,1)(2,0)(2,1)(3,0)(3,1)
+    costs: [
+      { c0: 1, c1: 0 },
+      { c0: 0, c1: 1 },
+      { c0: 0, c1: 1 },
+      { c0: 0, c1: 1 },
+      { c0: 0, c1: 1 },
+      { c0: 0, c1: 1 },
+      { c0: 0, c1: 1 },
+      { c0: 0, c1: 1 },
+    ],
+  }
+  let out
+  try {
+    out = runWorkerBundle(code, input)
+  } catch (e) {
+    check(`${asset} Worker 产物可执行并求解`, false, String(e && e.message || e))
+    return
+  }
+  const tag = `${asset} Worker 求解结果`
+  check(`${tag}：成功回传`, !!out && out.ok === true, JSON.stringify(out && out.message))
+  if (!out || !out.ok) return
+  const res = out.result
+  // Worker 将 BigInt 序列化为十进制字符串，页面直接展示
+  check(`${tag}：最优总代价展示为 0`, res.optimumCost === '0', `实际 ${res.optimumCost}`)
+  check(`${tag}：最优补全数展示为 1`, res.optimumCount === '1', `实际 ${res.optimumCount}`)
+  check(`${tag}：规范矩阵 M1 仅 C1 携带`, JSON.stringify(res.matrix) === JSON.stringify([
+    [1, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+  ]), JSON.stringify(res.matrix))
+  const kind = (r, c) => (res.calls.find((x) => x.r === r && x.c === c) || {}).kind
+  check(`${tag}：八格裁决 1×fixed1 + 7×fixed0`,
+    kind(0, 0) === 'fixed1' &&
+      [[0, 1], [1, 0], [1, 1], [2, 0], [2, 1], [3, 0], [3, 1]].every(([r, c]) => kind(r, c) === 'fixed0'),
+    JSON.stringify(res.calls))
+  const leaf = res.cloneTree && res.cloneTree.root && res.cloneTree.root.children[0]
+  check(`${tag}：克隆树 M1 载体仅 C1，空突变为 M2/M3`,
+    !!leaf && JSON.stringify(leaf.mutations) === '[0]' && JSON.stringify(leaf.carriers) === '[0]' &&
+      JSON.stringify(res.cloneTree.absentMutations) === '[1,2]',
+    JSON.stringify(res.cloneTree))
+}
+
 try {
   if (!(await waitForHealth(Date.now() + 8000))) {
     console.error('服务器未能在 8s 内就绪')
@@ -86,8 +154,8 @@ try {
     for (const w of workers) {
       const wr = await get(`http://127.0.0.1:${loggedPort}${w}`)
       check(`Web Worker chunk 可访问：${w.split('/').pop()}`, wr.status === 200, `status=${wr.status}`)
-      // Worker 中应包含求解器痕迹（层状 DP 等中文/关键字由压缩保留性差，改为检查可执行 JS 非空）
       check('Worker chunk 非空且为 JS', wr.body.length > 100)
+      await checkWorkerResult(wr.body, w)
     }
   }
 

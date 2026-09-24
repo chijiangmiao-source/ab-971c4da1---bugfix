@@ -308,20 +308,7 @@ function solveComponent(cols, vars, ctx) {
     .sort((a, b) => a.r - b.r || a.c - b.c)
     .map((u) => cellIndex[u.r][u.c])
 
-  const previousTwin = new Int16Array(L).fill(-1)
-  const lastByProfile = new Map()
-  for (let ci = 0; ci < L; ci++) {
-    const profile = `${lf1[ci]}/${lf0[ci]}/${lU[ci]}`
-    if (lastByProfile.has(profile)) previousTwin[ci] = lastByProfile.get(profile)
-    lastByProfile.set(profile, ci)
-  }
-
-  function respectsOrbitOrder(ci, carrier, assigned) {
-    const prev = previousTwin[ci]
-    return prev < 0 || assigned[prev] === null || cmpMask(assigned[prev], carrier) <= 0
-  }
-
-  // 列 ci 的未知格补值代价（按 s 位掩码）
+  // 列代价（按 s 位掩码）
   const maskCost = new Array(L)
   for (let ci = 0; ci < L; ci++) {
     const cache = new Map()
@@ -455,17 +442,11 @@ function solveComponent(cols, vars, ctx) {
     lb[mask] = lb[mask ^ low] + colMin[31 - Math.clz32(low)]
   }
 
-  function stateKey(remain, F, spent, assigned) {
+  function stateKey(remain, F, spent) {
     let k = remain.toString(36) + ',' + spent.toString(36)
     const masks = F.m.slice(1)
     masks.sort((a, b) => cmpMask(a, b))
     for (const msk of masks) k += '|' + msk.toString(36)
-    for (let ci = 0; ci < L; ci++) {
-      if ((remain & (1 << ci)) && previousTwin[ci] >= 0) {
-        const anchor = assigned[previousTwin[ci]]
-        k += '@' + (anchor === null ? '-' : anchor.toString(36))
-      }
-    }
     return k
   }
 
@@ -492,7 +473,7 @@ function solveComponent(cols, vars, ctx) {
 
   // 贪心：按 MRV 与代价升序尽快找到一个可行补全，作为初始最优上界
   const incumbent = { v: null }
-  function greedy(remain, F, spent, assigned) {
+  function greedy(remain, F, spent) {
     if (remain === 0) { incumbent.v = spent; return true }
     let pick = -1, pickEst = Infinity
     for (let ci = 0; ci < L; ci++) {
@@ -507,11 +488,8 @@ function solveComponent(cols, vars, ctx) {
     opts.sort((a, b) => a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0)
     const nextRemain = remain & ~(1 << pick)
     for (const o of opts) {
-      if (!respectsOrbitOrder(pick, o.S, assigned)) continue
       const nf = o.existing ? F : cloneInsert(F, o)
-      const nextAssigned = assigned.slice()
-      nextAssigned[pick] = o.S
-      if (greedy(nextRemain, nf, spent + o.cost, nextAssigned)) return true
+      if (greedy(nextRemain, nf, spent + o.cost)) return true
     }
     return false
   }
@@ -526,14 +504,14 @@ function solveComponent(cols, vars, ctx) {
     insertForest(nf, o.p, o.S, o.packed)
     return nf
   }
-  greedy(ALLCOLS, makeForest(), 0n, new Array(L).fill(null))
+  greedy(ALLCOLS, makeForest(), 0n)
 
-  function rec(remain, F, spent, assigned) {
+  function rec(remain, F, spent) {
     if (remain === 0) {
       if (incumbent.v === null || spent < incumbent.v) incumbent.v = spent
       return { best: 0n, count: 1n, ones: new Map(), canon: new Int8Array(K).fill(-1) }
     }
-    const k = stateKey(remain, F, spent, assigned)
+    const k = stateKey(remain, F, spent)
     const cached = memo.get(k)
     if (cached !== undefined) return cached
 
@@ -572,13 +550,10 @@ function solveComponent(cols, vars, ctx) {
     let bestCanon = null
 
     for (const o of pickOpts) {
-      if (!respectsOrbitOrder(pick, o.S, assigned)) continue
       // 可采纳下界剪枝：严格大于已知上界才舍弃（等号可能是另一个最优补全）
       if (incumbent.v !== null && spent + o.cost + lb[nextRemain] > incumbent.v) continue
       const nf = o.existing ? F : cloneInsert(F, o)
-      const nextAssigned = assigned.slice()
-      nextAssigned[pick] = o.S
-      const sub = rec(nextRemain, nf, spent + o.cost, nextAssigned)
+      const sub = rec(nextRemain, nf, spent + o.cost)
       if (sub.count === 0n) continue
       const total = o.cost + sub.best
 
@@ -632,7 +607,7 @@ function solveComponent(cols, vars, ctx) {
     return entry
   }
 
-  const root = rec(ALLCOLS, makeForest(), 0n, new Array(L).fill(null))
+  const root = rec(ALLCOLS, makeForest(), 0n)
   if (root.count === 0n) return null
 
   const canonical = {}

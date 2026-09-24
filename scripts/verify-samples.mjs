@@ -78,6 +78,44 @@ console.log('样例 C：任意精度计数（不相交列上的对称代价 → 
   assert(res.optimumCount === 16n, `补全数 = 2^4 = 16（实际：${res.optimumCount}）`)
 }
 
+console.log('样例 D：带标签零代价补全（首个突变仅由首细胞携带，后两突变无载体）')
+{
+  const matrix = [
+    [-1, -1, 0],
+    [-1, -1, 0],
+    [-1, -1, 0],
+    [-1, -1, 0],
+  ]
+  // 行优先问号序：(0,0)(0,1)(1,0)(1,1)(2,0)(2,1)(3,0)(3,1)
+  const costs = [
+    { c0: 1, c1: 0 }, // (0,0) M1@C1 偏好 1
+    { c0: 0, c1: 1 }, // (0,1)
+    { c0: 0, c1: 1 }, // (1,0)
+    { c0: 0, c1: 1 }, // (1,1)
+    { c0: 0, c1: 1 }, // (2,0)
+    { c0: 0, c1: 1 }, // (2,1)
+    { c0: 0, c1: 1 }, // (3,0)
+    { c0: 0, c1: 1 }, // (3,1)
+  ]
+  const res = solve({ matrix, costs })
+  assert(res.status === 'ok', `求解成功（实际：${res.status}）`)
+  assert(res.optimumCost === 0n, `最优总代价 = 0（实际：${res.optimumCost}）`)
+  assert(res.optimumCount === 1n, `最优补全数 = 1（实际：${res.optimumCount}）`)
+  assert(JSON.stringify(res.matrix) === JSON.stringify([
+    [1, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+  ]), `规范矩阵 = M1 仅 C1 携带（实际：${JSON.stringify(res.matrix)}）`)
+  const kind = (r, c) => res.calls.find((x) => x.r === r && x.c === c).kind
+  assert(kind(0, 0) === 'fixed1', '八个问号裁决：(0,0) 固定 1')
+  assert([[0, 1], [1, 0], [1, 1], [2, 0], [2, 1], [3, 0], [3, 1]]
+    .every(([r, c]) => kind(r, c) === 'fixed0'), '八个问号裁决：其余七格固定 0')
+  assert(JSON.stringify(res.cloneTree.absentMutations) === JSON.stringify([1, 2]),
+    `空突变 = M2、M3（实际：${res.cloneTree.absentMutations}）`)
+  const leaf = res.cloneTree.root.children[0]
+  assert(leaf && JSON.stringify(leaf.mutations) === JSON.stringify([0]) &&
+    JSON.stringify(leaf.carriers) === JSON.stringify([0]),
+    '克隆树叶节点 = M1，载体仅 C1')
+}
+
 if (failures) {
   console.error(`\nverify 样例核对失败：${failures} 项`)
   process.exit(1)

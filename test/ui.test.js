@@ -123,3 +123,78 @@ test('UI 端到端：示例求解→计数/规范矩阵/可变标记/克隆树�
   assert.match($('errorBox').textContent, /非负整数/)
   assert.equal($('resultSection').classList.contains('hidden'), true)
 })
+
+test('UI 端到端：带标签零代价场景——4×3、前两列全问号，页面展示 0 代价/唯一补全/裁决/克隆树', () => {
+  const $ = (id) => document.getElementById(id)
+
+  // 清空上一场景残留的单元格与代价草稿，再显式设为 4 细胞 × 3 突变
+  $('clearAll').click()
+  $('nRows').value = '4'
+  $('nCols').value = '3'
+  $('applySize').click()
+  assert.equal($('unkCount').textContent, '0')
+
+  // 前两列设为问号，第三列固定 0（默认即 0）
+  const sels = $('grid').querySelectorAll('select.cell')
+  assert.equal(sels.length, 12)
+  for (let r = 0; r < 4; r++) {
+    for (let c = 0; c < 2; c++) {
+      const sel = sels[r * 3 + c]
+      sel.value = '?'
+      fire(sel, 'change')
+    }
+  }
+  assert.equal($('unkCount').textContent, '8')
+
+  // 代价按行优先：(0,0) 偏好 1（c0=1,c1=0），其余七格偏好 0（c0=0,c1=1）
+  const costInputs = document.querySelectorAll('#costTableWrap input.cost')
+  assert.equal(costInputs.length, 16) // 8 行 × (填0, 填1)
+  const setCost = (qi, which, val) => {
+    const inp = [...costInputs].find((x) =>
+      Number(x.dataset.r) === [0, 0, 1, 1, 2, 2, 3, 3][qi] &&
+      Number(x.dataset.c) === [0, 1, 0, 1, 0, 1, 0, 1][qi] &&
+      x.dataset.which === which)
+    inp.value = val
+    fire(inp, 'input')
+  }
+  for (let qi = 0; qi < 8; qi++) {
+    if (qi === 0) { setCost(qi, 'c0', '1'); setCost(qi, 'c1', '0') }
+    else { setCost(qi, 'c0', '0'); setCost(qi, 'c1', '1') }
+  }
+
+  $('solveBtn').click()
+  assert.equal($('resultSection').classList.contains('hidden'), false)
+  // 指标展示（Worker 序列化为字符串）
+  assert.equal($('optCost').textContent, '0')
+  assert.equal($('optCount').textContent, '1')
+
+  // 结果矩阵：行 r+1、列 c+1
+  const cell = (r, c) => [...$('resultMatrix').querySelectorAll('tr')][r + 1].children[c + 1]
+  assert.equal(cell(0, 0).textContent, '1')
+  assert.ok(cell(0, 0).classList.contains('fixed1'))
+  for (const [r, c] of [[0, 1], [1, 0], [1, 1], [2, 0], [2, 1], [3, 0], [3, 1]]) {
+    assert.equal(cell(r, c).textContent, '0', `(${r},${c}) 显示 0`)
+    assert.ok(cell(r, c).classList.contains('fixed0'), `(${r},${c}) 标记固定 0`)
+  }
+  for (let r = 0; r < 4; r++) {
+    assert.equal(cell(r, 2).textContent, '0')
+    assert.ok(cell(r, 2).classList.contains('fixedcell'))
+  }
+  // 不应出现“同优可变”
+  assert.equal($('resultMatrix').querySelectorAll('.free').length, 0)
+
+  // 克隆树：叶节点 M1 载体 C1；空突变提示列出 M2、M3
+  const treeText = $('tree').textContent
+  assert.match(treeText, /M1/)
+  assert.match(treeText, /C1/)
+  assert.ok(!/M2|M3/.test($('tree').querySelectorAll('.treenode')[0]?.textContent || ''))
+  assert.equal($('absentNote').classList.contains('hidden'), false)
+  const absentText = $('absentNote').textContent
+  assert.match(absentText, /M2/)
+  assert.match(absentText, /M3/)
+
+  // 可复算记录中的 Worker 展示结果一致
+  const dump = JSON.parse($('jsonDump').textContent)
+  assert.equal(dump.result.optimumCost, '0')
+  assert.equal(dump.result.optimumCount, '1')
+})

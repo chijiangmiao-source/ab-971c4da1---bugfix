@@ -178,6 +178,153 @@ test('同优歧义样例：c2 有三个同代价可行载体（{}、{0}、{2}）
   assert.equal(res.matrix[1][0], 1)
 })
 
+test('带标签零代价补全：仅首细胞携带偏好列，唯一补全，八格裁决与克隆树载体精确核对', () => {
+  // 4 细胞 × 3 突变：前两个突变的 4 格全部为问号，第三个突变固定全 0。
+  // M1 只在首细胞偏好填 1（c1=0,c0=1），其余问号一律偏好填 0（c0=0,c1=1）。
+  const matrix = [
+    [-1, -1, 0],
+    [-1, -1, 0],
+    [-1, -1, 0],
+    [-1, -1, 0],
+  ]
+  // 行优先问号序：(0,0)(0,1)(1,0)(1,1)(2,0)(2,1)(3,0)(3,1)
+  const costs = [
+    { c0: 1, c1: 0 }, // (0,0) M1@C1 偏好 1
+    { c0: 0, c1: 1 }, // (0,1)
+    { c0: 0, c1: 1 }, // (1,0)
+    { c0: 0, c1: 1 }, // (1,1)
+    { c0: 0, c1: 1 }, // (2,0)
+    { c0: 0, c1: 1 }, // (2,1)
+    { c0: 0, c1: 1 }, // (3,0)
+    { c0: 0, c1: 1 }, // (3,1)
+  ]
+  const ref = bruteForce(matrix, costs)
+  assert.notEqual(ref, null)
+  assert.equal(ref.best, 0n)
+  assert.equal(ref.count, 1n)
+
+  const res = solve({ matrix, costs })
+  assert.equal(res.status, 'ok')
+  // 最优代价与精确计数
+  assert.equal(res.optimumCost, 0n)
+  assert.equal(res.optimumCount, 1n)
+  // 完整规范矩阵：M1 仅由 C1 携带，M2/M3 无载体
+  assert.deepEqual(res.matrix, [
+    [1, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ])
+  assert.deepEqual(res.matrix, ref.canonical)
+  // 八个问号的裁决：首格固定 1，其余七格固定 0
+  const kind = (r, c) => res.calls.find((x) => x.r === r && x.c === c).kind
+  assert.equal(kind(0, 0), 'fixed1')
+  for (const [r, c] of [[0, 1], [1, 0], [1, 1], [2, 0], [2, 1], [3, 0], [3, 1]]) {
+    assert.equal(kind(r, c), 'fixed0', `(${r},${c}) 应固定 0`)
+  }
+  // 克隆树：M1 挂在根下、载体仅 C1；M2、M3 列入空突变
+  assert.deepEqual(res.cloneTree.absentMutations, [1, 2])
+  assert.equal(res.cloneTree.root.children.length, 1)
+  const leaf = res.cloneTree.root.children[0]
+  assert.deepEqual(leaf.mutations, [0])
+  assert.deepEqual(leaf.carriers, [0])
+})
+
+test('列顺序调整回归：突变列重排后结果按标签重映射，偏好随列移动而非随位置', () => {
+  // 同一结构，把“偏好列”从第 1 列挪到第 3 列（输入列序 M2,M3,M1）：
+  // 零代价补全必须是 M3（新下标 2）仅由 C1 携带。
+  const matrix = [
+    [0, -1, -1],
+    [0, -1, -1],
+    [0, -1, -1],
+    [0, -1, -1],
+  ]
+  // 行优先问号序：(0,1)(0,2)(1,1)(1,2)(2,1)(2,2)(3,1)(3,2)
+  const costs = [
+    { c0: 0, c1: 1 }, // (0,1) M2 偏好 0
+    { c0: 1, c1: 0 }, // (0,2) M3（原 M1）偏好 1
+    { c0: 0, c1: 1 }, // (1,1)
+    { c0: 0, c1: 1 }, // (1,2)
+    { c0: 0, c1: 1 }, // (2,1)
+    { c0: 0, c1: 1 }, // (2,2)
+    { c0: 0, c1: 1 }, // (3,1)
+    { c0: 0, c1: 1 }, // (3,2)
+  ]
+  const res = solve({ matrix, costs })
+  assert.equal(res.status, 'ok')
+  assert.equal(res.optimumCost, 0n)
+  assert.equal(res.optimumCount, 1n)
+  assert.deepEqual(res.matrix, [
+    [0, 0, 1],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ])
+  const kind = (r, c) => res.calls.find((x) => x.r === r && x.c === c).kind
+  assert.equal(kind(0, 2), 'fixed1')
+  for (const [r, c] of [[0, 1], [1, 1], [1, 2], [2, 1], [2, 2], [3, 1], [3, 2]]) {
+    assert.equal(kind(r, c), 'fixed0', `(${r},${c}) 应固定 0`)
+  }
+  assert.deepEqual(res.cloneTree.absentMutations, [0, 1])
+  assert.deepEqual(res.cloneTree.root.children[0].mutations, [2])
+  assert.deepEqual(res.cloneTree.root.children[0].carriers, [0])
+})
+
+test('相同结构不同代价偏好回归：同构问号布局，偏好翻转后最优随标签改变', () => {
+  // 与主场景结构完全相同（M1/M2 全问号、M3 固定 0），但 M1 在 C1 处改为偏好 0：
+  // 全零成为唯一零代价补全，首格随之固定 0；再翻转成偏好 1 又得到唯一带标签解。
+  const base = [
+    [-1, -1, 0],
+    [-1, -1, 0],
+    [-1, -1, 0],
+    [-1, -1, 0],
+  ]
+  const prefZero = [
+    { c0: 0, c1: 1 }, { c0: 0, c1: 1 },
+    { c0: 0, c1: 1 }, { c0: 0, c1: 1 },
+    { c0: 0, c1: 1 }, { c0: 0, c1: 1 },
+    { c0: 0, c1: 1 }, { c0: 0, c1: 1 },
+  ]
+  const z = solve({ matrix: base, costs: prefZero })
+  assert.equal(z.optimumCost, 0n)
+  assert.equal(z.optimumCount, 1n)
+  assert.deepEqual(z.matrix, Array.from({ length: 4 }, () => [0, 0, 0]))
+  assert.ok(z.calls.every((x) => x.kind === 'fixed0'))
+  assert.deepEqual(z.cloneTree.absentMutations, [0, 1, 2])
+
+  // 仅翻转 (0,0) 的偏好 → M1={C1} 成为唯一零代价解
+  const prefOne = prefZero.map((c) => ({ ...c }))
+  prefOne[0] = { c0: 1, c1: 0 }
+  const o = solve({ matrix: base, costs: prefOne })
+  assert.equal(o.optimumCost, 0n)
+  assert.equal(o.optimumCount, 1n)
+  assert.equal(o.matrix[0][0], 1)
+  assert.equal(o.calls.find((x) => x.r === 0 && x.c === 0).kind, 'fixed1')
+})
+
+test('同轮廓列带标签不可互换：两列全问号零代价按有序载体对计数（暴力对照）', () => {
+  // 4 行上两列全部为问号、第三列固定 0；所有补值零代价。
+  // 两列为不同标签（问号格不同），(A,B) 与 (B,A) 是两个不同补全：
+  // 256 个有序载体对中，60 对同时出现 11/10/01 三种配型，合法补全 = 196。
+  // 旧实现的“同轮廓列对称破缺”会强制载体单调序而漏计（并可能漏掉带标签最优解）。
+  const matrix = [
+    [-1, -1, 0],
+    [-1, -1, 0],
+    [-1, -1, 0],
+    [-1, -1, 0],
+  ]
+  const costs = Array.from({ length: 8 }, () => ({ c0: 0, c1: 0 }))
+  const ref = bruteForce(matrix, costs)
+  assert.equal(ref.count, 196n)
+  const res = solve({ matrix, costs })
+  assert.equal(res.status, 'ok')
+  assert.equal(res.optimumCost, 0n)
+  assert.equal(res.optimumCount, 196n)
+  assert.deepEqual(res.matrix, ref.canonical)
+  // 零代价下每个问号都同优可变
+  assert.ok(res.calls.every((x) => x.kind === 'free'))
+})
+
 test('任意精度：10^30 量级代价全程 BigInt 精确', () => {
   const n = 18, m = 12
   const matrix = Array.from({ length: n }, () => new Array(m).fill(0))
