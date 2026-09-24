@@ -143,6 +143,196 @@ test('随机小规模：最优代价、补全数、规范矩阵、逐格裁决�
   assert.ok(feasibleCases > 50, `可行样例过少：${feasibleCases}`)
 })
 
+test('回归（报告场景）：同剖面不同代价的列不得对称剪枝——唯一零代价补全为 M1 仅 C1 携带', () => {
+  // 4 细胞 × 3 突变：M1、M2 四个格子全为问号，M3 全部固定 0
+  // 代价：M1 仅 C1 偏好填 1（c0=1,c1=0），其余 7 个问号均偏好填 0（c0=0,c1=1）
+  const matrix = [
+    [-1, -1, 0],
+    [-1, -1, 0],
+    [-1, -1, 0],
+    [-1, -1, 0],
+  ]
+  const costs = [
+    { c0: 1, c1: 0 }, { c0: 0, c1: 1 }, // C1：M1 偏好 1，M2 偏好 0
+    { c0: 0, c1: 1 }, { c0: 0, c1: 1 }, // C2
+    { c0: 0, c1: 1 }, { c0: 0, c1: 1 }, // C3
+    { c0: 0, c1: 1 }, { c0: 0, c1: 1 }, // C4
+  ]
+  // 暴力枚举对照：唯一零代价补全
+  const ref = bruteForce(matrix, costs)
+  assert.notEqual(ref, null)
+  assert.equal(ref.best, 0n)
+  assert.equal(ref.count, 1n)
+
+  const res = solve({ matrix, costs })
+  assert.equal(res.status, 'ok')
+  // 最优总代价与精确计数
+  assert.equal(res.optimumCost, 0n)
+  assert.equal(res.optimumCount, 1n)
+  // 完整规范矩阵：M1 仅由 C1 携带，M2、M3 均无载体
+  assert.deepEqual(res.matrix, [
+    [1, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ])
+  // 八个问号的裁决：仅 (C1,M1) 固定 1，其余七个固定 0
+  assert.equal(res.calls.length, 8)
+  const kind = (r, c) => res.calls.find((x) => x.r === r && x.c === c).kind
+  assert.equal(kind(0, 0), 'fixed1')
+  for (const [r, c] of [[0, 1], [1, 0], [1, 1], [2, 0], [2, 1], [3, 0], [3, 1]]) {
+    assert.equal(kind(r, c), 'fixed0', `格(${r},${c}) 应为固定 0`)
+  }
+  // 规范克隆树：M1 载体为 {C1}；M2、M3 列入空突变
+  assert.deepEqual(res.cloneTree.absentMutations, [1, 2])
+  assert.equal(res.cloneTree.root.children.length, 1)
+  const carrier = res.cloneTree.root.children[0]
+  assert.deepEqual(carrier.mutations, [0])
+  assert.deepEqual(carrier.carriers, [0])
+  assert.equal(carrier.children.length, 0)
+})
+
+test('回归：报告场景的列顺序调整（结论按列置换相应平移）', () => {
+  // 三个逻辑列：P=偏好 C1=1 的全问号列；Z=全问号全偏好 0 列；F=全固定 0 列
+  const perms = [
+    ['P', 'Z', 'F'],
+    ['P', 'F', 'Z'],
+    ['Z', 'P', 'F'],
+    ['Z', 'F', 'P'],
+    ['F', 'P', 'Z'],
+    ['F', 'Z', 'P'],
+  ]
+  for (const perm of perms) {
+    const matrix = []
+    const costs = []
+    for (let r = 0; r < 4; r++) {
+      const row = []
+      for (const kind of perm) {
+        if (kind === 'F') row.push(0)
+        else {
+          row.push(-1)
+          costs.push(kind === 'P' && r === 0 ? { c0: 1, c1: 0 } : { c0: 0, c1: 1 })
+        }
+      }
+      matrix.push(row)
+    }
+    const pCol = perm.indexOf('P')
+    const res = solve({ matrix, costs })
+    assert.equal(res.status, 'ok', `列序 ${perm}`)
+    assert.equal(res.optimumCost, 0n, `列序 ${perm} 最优代价`)
+    assert.equal(res.optimumCount, 1n, `列序 ${perm} 补全数`)
+    // 规范矩阵：仅 C1 在 P 列取 1
+    const expected = [0, 1, 2, 3].map((r) => perm.map((_, c) => (r === 0 && c === pCol ? 1 : 0)))
+    assert.deepEqual(res.matrix, expected, `列序 ${perm} 规范矩阵`)
+    // 裁决：仅 (C1,P) 固定 1，其余七个问号固定 0
+    assert.equal(res.calls.length, 8, `列序 ${perm} 问号数`)
+    for (const call of res.calls) {
+      const expect = call.r === 0 && call.c === pCol ? 'fixed1' : 'fixed0'
+      assert.equal(call.kind, expect, `列序 ${perm} 格(${call.r},${call.c})`)
+    }
+    // 克隆树：P 列载体 {C1}，其余两列为空突变
+    assert.deepEqual(res.cloneTree.absentMutations, [0, 1, 2].filter((c) => c !== pCol), `列序 ${perm} 空突变`)
+    assert.equal(res.cloneTree.root.children.length, 1, `列序 ${perm} 树形`)
+    assert.deepEqual(res.cloneTree.root.children[0].mutations, [pCol], `列序 ${perm} 树载体突变`)
+    assert.deepEqual(res.cloneTree.root.children[0].carriers, [0], `列序 ${perm} 树载体细胞`)
+  }
+})
+
+test('回归：相同结构不同代价偏好（最优解随偏好唯一确定）', () => {
+  // 结构同报告场景（M1、M2 全问号，M3 全固定 0），代价偏好不同
+  const matrix = [
+    [-1, -1, 0],
+    [-1, -1, 0],
+    [-1, -1, 0],
+    [-1, -1, 0],
+  ]
+  // 情形 A：M2 在 C3 偏好 1，其余偏好 0 → 唯一零代价：M2={C3}
+  {
+    const costs = [
+      { c0: 0, c1: 1 }, { c0: 0, c1: 1 },
+      { c0: 0, c1: 1 }, { c0: 0, c1: 1 },
+      { c0: 0, c1: 1 }, { c0: 1, c1: 0 },
+      { c0: 0, c1: 1 }, { c0: 0, c1: 1 },
+    ]
+    const res = solve({ matrix, costs })
+    assert.equal(res.status, 'ok')
+    assert.equal(res.optimumCost, 0n)
+    assert.equal(res.optimumCount, 1n)
+    assert.deepEqual(res.matrix, [
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 1, 0],
+      [0, 0, 0],
+    ])
+    const kind = (r, c) => res.calls.find((x) => x.r === r && x.c === c).kind
+    assert.equal(kind(2, 1), 'fixed1')
+    assert.deepEqual(res.cloneTree.absentMutations, [0, 2])
+    assert.deepEqual(res.cloneTree.root.children[0].mutations, [1])
+    assert.deepEqual(res.cloneTree.root.children[0].carriers, [2])
+  }
+  // 情形 B：M1、M2 都在 C1 偏好 1 → 唯一零代价：M1=M2={C1}（同载体共存于树节点）
+  {
+    const costs = [
+      { c0: 1, c1: 0 }, { c0: 1, c1: 0 },
+      { c0: 0, c1: 1 }, { c0: 0, c1: 1 },
+      { c0: 0, c1: 1 }, { c0: 0, c1: 1 },
+      { c0: 0, c1: 1 }, { c0: 0, c1: 1 },
+    ]
+    const res = solve({ matrix, costs })
+    assert.equal(res.status, 'ok')
+    assert.equal(res.optimumCost, 0n)
+    assert.equal(res.optimumCount, 1n)
+    assert.deepEqual(res.matrix, [
+      [1, 1, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+    ])
+    assert.deepEqual(res.cloneTree.absentMutations, [2])
+    assert.deepEqual(res.cloneTree.root.children[0].mutations, [0, 1])
+    assert.deepEqual(res.cloneTree.root.children[0].carriers, [0])
+  }
+  // 情形 C：全部偏好 0 → 唯一零代价为全零矩阵，三列皆空突变
+  {
+    const costs = Array.from({ length: 8 }, () => ({ c0: 0, c1: 1 }))
+    const res = solve({ matrix, costs })
+    assert.equal(res.status, 'ok')
+    assert.equal(res.optimumCost, 0n)
+    assert.equal(res.optimumCount, 1n)
+    assert.deepEqual(res.matrix, [
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+    ])
+    assert.ok(res.calls.every((x) => x.kind === 'fixed0'))
+    assert.deepEqual(res.cloneTree.absentMutations, [0, 1, 2])
+    assert.equal(res.cloneTree.root.children.length, 0)
+  }
+})
+
+test('回归：完全同构的列按有标号补全精确计数（196），不得取轨道代表少计', () => {
+  // 两列全问号、全零代价：每个层状相容的载体对都是一个最优补全（暴力 = 196）
+  const matrix = [
+    [-1, -1, 0],
+    [-1, -1, 0],
+    [-1, -1, 0],
+    [-1, -1, 0],
+  ]
+  const costs = Array.from({ length: 8 }, () => ({ c0: 0, c1: 0 }))
+  const ref = bruteForce(matrix, costs)
+  assert.notEqual(ref, null)
+  assert.equal(ref.best, 0n)
+  assert.equal(ref.count, 196n)
+  const res = solve({ matrix, costs })
+  assert.equal(res.status, 'ok')
+  assert.equal(res.optimumCost, 0n)
+  assert.equal(res.optimumCount, 196n)
+  assert.deepEqual(res.matrix, ref.canonical)
+  // 全零代价下每个问号取 0/1 都可达最优
+  assert.ok(res.calls.every((x) => x.kind === 'free'))
+})
+
 test('同优歧义样例：c2 有三个同代价可行载体（{}、{0}、{2}），计数 3、两格可变', () => {
   // 4 细胞 3 突变；三列通过共享行在约束图连成一个分量
   const matrix = [

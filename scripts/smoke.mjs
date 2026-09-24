@@ -88,6 +88,50 @@ try {
       check(`Web Worker chunk 可访问：${w.split('/').pop()}`, wr.status === 200, `status=${wr.status}`)
       // Worker 中应包含求解器痕迹（层状 DP 等中文/关键字由压缩保留性差，改为检查可执行 JS 非空）
       check('Worker chunk 非空且为 JS', wr.body.length > 100)
+
+      // 功能性核对：以假 self 执行生产 Worker，求解“唯一零代价带标签补全”场景，
+      // 展示结果必须与求解器代码测试一致（代价 0 / 计数 1 / M1 仅 C1 携带）
+      const scenario = {
+        matrix: [
+          [-1, -1, 0],
+          [-1, -1, 0],
+          [-1, -1, 0],
+          [-1, -1, 0],
+        ],
+        costs: [
+          { c0: 1, c1: 0 }, { c0: 0, c1: 1 },
+          { c0: 0, c1: 1 }, { c0: 0, c1: 1 },
+          { c0: 0, c1: 1 }, { c0: 0, c1: 1 },
+          { c0: 0, c1: 1 }, { c0: 0, c1: 1 },
+        ],
+      }
+      const posted = []
+      const fakeSelf = { postMessage: (m) => posted.push(m) }
+      try {
+        new Function('self', wr.body)(fakeSelf)
+        fakeSelf.onmessage({ data: { id: 1, input: scenario } })
+      } catch (e) {
+        check('Worker chunk 可执行并响应消息', false, String(e && e.message || e))
+        continue
+      }
+      const out = posted.find((m) => m.id === 1)
+      check('Worker 返回求解响应', !!out && out.ok === true, out && !out.ok ? out.message : '')
+      if (out && out.ok) {
+        const res = out.result
+        check('Worker 最优总代价 = 0', res.optimumCost === '0', `实际 ${res.optimumCost}`)
+        check('Worker 最优补全数 = 1', res.optimumCount === '1', `实际 ${res.optimumCount}`)
+        check('Worker 规范矩阵为 M1 仅 C1 携带',
+          JSON.stringify(res.matrix) === JSON.stringify([[1, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]]),
+          JSON.stringify(res.matrix))
+        const kind = (rr, cc) => (res.calls.find((x) => x.r === rr && x.c === cc) || {}).kind
+        check('Worker 裁决：(C1,M1) 固定 1、其余七个问号固定 0',
+          kind(0, 0) === 'fixed1' &&
+          [[0, 1], [1, 0], [1, 1], [2, 0], [2, 1], [3, 0], [3, 1]].every(([a, b]) => kind(a, b) === 'fixed0'))
+        check('Worker 克隆树：M1 载体 C1，M2/M3 为空突变',
+          JSON.stringify(res.cloneTree.absentMutations) === '[1,2]' &&
+          JSON.stringify(res.cloneTree.root.children[0].mutations) === '[0]' &&
+          JSON.stringify(res.cloneTree.root.children[0].carriers) === '[0]')
+      }
     }
   }
 
